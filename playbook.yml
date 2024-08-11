@@ -1,0 +1,131 @@
+---
+- name: DOTNET TESTING PLAY
+  hosts: server1
+  vars:
+    GIT_REPO: 'git@github.com:SadiqOnGithub/dotnet_ansible.git'
+    GIT_BRANCH: main
+    DEST: '/tmp/dotnet'
+    PROJECT_NAME: ansible-clone-repo
+    DOTNET_APP_DIR: '/var/www/test'
+    APP_DIR: HelloWorldApi
+    DOTNET_SERVICE_NAME: dotnet.test
+    PORT: 8005
+  gather_facts: no
+  become: yes
+
+  tasks:
+    - name: Install packages
+      tags: dotnet,git,install
+      ansible.builtin.package:
+        name: git
+
+    - name: Clone a private repository into {{ PROJECT_NAME }} folder.
+      tags: dotnet,clone,git
+      git:
+        repo: '{{ GIT_REPO }}'
+        version: '{{ GIT_BRANCH }}'
+        dest: '{{ DEST }}'
+        accept_hostkey: yes
+        force: true # if localchnages are there then it will help to override them
+      become: no # keep become: no OR it will fail
+
+    - name: Set permissions recursively on the {{ DEST }}
+      tags: dotnet,permissions,dest
+      file:
+        path: '{{ DEST }}'
+        owner: '{{ ansible_user }}'
+        group: '{{ ansible_user }}'
+        mode: '0755'
+        recurse: yes
+
+    - name: Install DOTNET SDK
+      tags: dotnet,install
+      shell: |
+        wget https://dot.net/v1/dotnet-install.sh -O dotnet-install.sh
+        chmod +x dotnet-install.sh
+        ./dotnet-install.sh
+      args:
+        creates: '{{ DOTNET_BIN }}'
+
+    - name: Check if DOTNET service exists
+      tags: dotnet,check,sysvinit
+      command: service {{ DOTNET_SERVICE_NAME }} status
+      register: service_status
+      ignore_errors: yes
+
+    - name: Stop the DOTNET service
+      tags: dotnet,disabled,sysvinit
+      command: service {{ DOTNET_SERVICE_NAME }} stop
+      ignore_errors: yes
+
+    - name: Create application directory
+      tags: dotnet,dir,create
+      file:
+        path: '{{ DOTNET_APP_DIR }}'
+        state: directory
+        owner: '{{ ansible_user }}'
+        group: '{{ ansible_user }}'
+        mode: '0777'
+
+    - name: Build & Release the DOTNET application
+      tags: dotnet,build,release
+      shell: |
+        {{ DOTNET_BIN }} build -c Release && {{ DOTNET_BIN }} publish -c Release -r linux-x64 -o {{ DOTNET_APP_DIR }}
+      args:
+        chdir: '{{ DEST }}'
+
+    - name: Set permissions recursively on the {{ DOTNET_APP_DIR }}
+      tags: dotnet,permissions,dest
+      file:
+        path: '{{ DOTNET_APP_DIR }}'
+        owner: '{{ ansible_user }}'
+        group: '{{ ansible_user }}'
+        mode: '0755'
+        recurse: yes
+
+
+    - name: Create init script for DOTNET application
+      tags: dotnet,service,sysvinit
+      copy:
+        dest: /etc/init.d/{{ DOTNET_SERVICE_NAME }}
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          ### BEGIN INIT INFO
+          # Provides:          {{ DOTNET_SERVICE_NAME }}
+          # Required-Start:    $remote_fs $syslog
+          # Required-Stop:     $remote_fs $syslog
+          # Default-Start:     2 3 4 5
+          # Default-Stop:      0 1 6
+          # Short-Description: Start/stop {{ DOTNET_SERVICE_NAME }}
+          ### END INIT INFO
+
+          case "$1" in
+            start)
+              echo "Starting {{ DOTNET_SERVICE_NAME }}"
+              # Start command here
+              {{ DOTNET_BIN }} {{ DOTNET_APP_DIR }}/{{ APP_DIR }}.dll --urls http://localhost:{{ PORT }} &
+              ;;
+            stop)
+              echo "Stopping {{ DOTNET_SERVICE_NAME }}"
+              # Stop command here
+              pkill -f "{{ DOTNET_APP_DIR }}/{{ APP_DIR }}.dll"
+              ;;
+            restart)
+              $0 stop
+              $0 start
+              ;;
+            *)
+              echo "Usage: $0 {start|stop|restart}"
+              exit 1
+              ;;
+          esac
+          exit 0
+
+    - name: Enable the DOTNET service
+      tags: dotnet,enabled,sysvinit
+      command: update-rc.d {{ DOTNET_SERVICE_NAME }} defaults
+
+    - name: Start the DOTNET service
+      tags: dotnet,started,sysvinit
+      command: service dotnet.test start
